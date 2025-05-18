@@ -1,6 +1,5 @@
 import requests
 import pandas as pd
-import time
 import ta
 from datetime import datetime
 
@@ -16,7 +15,7 @@ def enviar_telegram(mensagem):
             data={"chat_id": CHAT_ID, "text": mensagem}
         )
     except Exception as e:
-        print(f"Erro Telegram: {e}")
+        print(f"Erro ao enviar mensagem no Telegram: {e}")
 
 def buscar_pares_futuros_usdt():
     try:
@@ -118,12 +117,6 @@ def analisar():
         enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
         return
 
-    melhor_score = 0
-    melhor_par = None
-    melhor_criterios = []
-    melhor_tipo = "Indefinido"
-    melhor_preco = 0.0
-
     for par in pares:
         df1h = obter_dados(par, "1h")
         df5m = obter_dados(par, "5m")
@@ -134,40 +127,30 @@ def analisar():
         preco = df1h["close"].iloc[-1]
         registrar_sinal(par, score, criterios, tipo, score >= 5)
 
-        if score > melhor_score:
-            melhor_score = score
-            melhor_par = par
-            melhor_criterios = criterios
-            melhor_tipo = tipo
-            melhor_preco = preco
+        if score >= 5 and tipo in ["Compra", "Venda"]:
+            entrada = preco
+            tp1 = round(entrada * (1.01 if tipo == "Compra" else 0.99), 4)
+            tp2 = round(entrada * (1.02 if tipo == "Compra" else 0.98), 4)
+            tp3 = round(entrada * (1.03 if tipo == "Compra" else 0.97), 4)
+            sl = round(entrada * (0.985 if tipo == "Compra" else 1.015), 4)
+            hora = datetime.utcnow().strftime("%H:%M:%S UTC")
 
-    if melhor_score >= 5 and melhor_tipo in ["Compra", "Venda"]:
-        entrada = melhor_preco
-        tp1 = round(entrada * (1.01 if melhor_tipo == "Compra" else 0.99), 4)
-        tp2 = round(entrada * (1.02 if melhor_tipo == "Compra" else 0.98), 4)
-        tp3 = round(entrada * (1.03 if melhor_tipo == "Compra" else 0.97), 4)
-        sl = round(entrada * (0.985 if melhor_tipo == "Compra" else 1.015), 4)
-        hora = datetime.utcnow().strftime("%H:%M:%S UTC")
-
-        msg = f"""✅ Sinal forte detectado!
+            msg = f"""✅ Sinal forte detectado!
 🕒 Horário: {hora}
-📊 Par: {melhor_par}
-📈 Score: {melhor_score}/6
-📌 Tipo de sinal: {melhor_tipo}
+📊 Par: {par}
+📈 Score: {score}/6
+📌 Tipo de sinal: {tipo}
 💵 Entrada: {entrada}
 🎯 TP1 (50%): {tp1}
 🎯 TP2 (30%): {tp2}
 🎯 TP3 (20%): {tp3}
 ❌ Stop Loss: {sl}
 🧠 Critérios:"""
-        for crit in melhor_criterios:
-            msg += f"\n• {crit}"
-        enviar_telegram(msg)
-    else:
-        enviar_telegram("⚠️ Nenhum sinal forte e confiável identificado.")
+            for crit in criterios:
+                msg += f"\n• {crit}"
+            enviar_telegram(msg)
 
 # === INÍCIO DO BOT ===
-enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) iniciado com sucesso!")
+enviar_telegram("🤖 Bot de sinais cripto 24h iniciado com sucesso!")
 while True:
-    analisar()
-    time.sleep(20 * 60)  # Executa a cada 20 minutos
+    analisar()  # Executa a análise continuamente sem intervalo fixo.
