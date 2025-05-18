@@ -4,6 +4,7 @@ import time
 import ta
 from datetime import datetime
 
+# Configurações do bot
 TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
 CHAT_ID = "719387436"
 CSV_FILE = "sinais_registrados.csv"
@@ -22,7 +23,8 @@ def buscar_pares_futuros_usdt():
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, timeout=10).json()
         return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
-    except:
+    except Exception as e:
+        print(f"Erro ao buscar pares: {e}")
         return []
 
 def obter_dados(par, intervalo="1h", limite=200):
@@ -41,7 +43,8 @@ def obter_dados(par, intervalo="1h", limite=200):
             df["low"] = df["low"].astype(float)
             df["volume"] = df["volume"].astype(float)
             return df
-    except:
+    except Exception as e:
+        print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
 def detectar_formacoes(df):
@@ -55,7 +58,9 @@ def detectar_formacoes(df):
 def calcular_score(df1h, df5m):
     score = 0
     criterios = []
+    tipo = "Indefinido"
 
+    # RSI
     rsi = ta.momentum.RSIIndicator(df1h["close"]).rsi().iloc[-1]
     if rsi > 70:
         score += 1
@@ -65,9 +70,8 @@ def calcular_score(df1h, df5m):
         score += 1
         criterios.append("RSI sobrevendido")
         tipo = "Compra"
-    else:
-        tipo = "Indefinido"
 
+    # EMA
     ema = ta.trend.EMAIndicator(df1h["close"], window=21).ema_indicator().iloc[-1]
     if df1h["close"].iloc[-1] > ema:
         score += 1
@@ -75,6 +79,7 @@ def calcular_score(df1h, df5m):
     else:
         criterios.append("EMA tendência de baixa")
 
+    # Bollinger Bands
     bb = ta.volatility.BollingerBands(df1h["close"])
     close = df1h["close"].iloc[-1]
     if close < bb.bollinger_lband().iloc[-1]:
@@ -84,6 +89,7 @@ def calcular_score(df1h, df5m):
         score += 1
         criterios.append("Bollinger acima da banda superior")
 
+    # Suporte e Resistência
     suporte = min(df1h["close"].tail(20))
     resistencia = max(df1h["close"].tail(20))
     if abs(close - suporte) / close < 0.01:
@@ -93,15 +99,10 @@ def calcular_score(df1h, df5m):
         score += 1
         criterios.append("Resistência próxima")
 
+    # Formações gráficas
     if detectar_formacoes(df5m):
         score += 1
         criterios.append("Formação gráfica detectada")
-
-    vol = df1h["volume"].iloc[-1]
-    vol_med = df1h["volume"].rolling(20).mean().iloc[-1]
-    if vol > vol_med * 1.5:
-        score += 1
-        criterios.append("Volume elevado")
 
     return score, criterios, tipo
 
@@ -145,7 +146,6 @@ def analisar():
         tp1 = round(entrada * (1.01 if melhor_tipo == "Compra" else 0.99), 4)
         tp2 = round(entrada * (1.02 if melhor_tipo == "Compra" else 0.98), 4)
         tp3 = round(entrada * (1.03 if melhor_tipo == "Compra" else 0.97), 4)
-        alvo = round(entrada * (1.04 if melhor_tipo == "Compra" else 0.96), 4)
         sl = round(entrada * (0.985 if melhor_tipo == "Compra" else 1.015), 4)
         hora = datetime.utcnow().strftime("%H:%M:%S UTC")
 
@@ -155,10 +155,9 @@ def analisar():
 📈 Score: {melhor_score}/6
 📌 Tipo de sinal: {melhor_tipo}
 💵 Entrada: {entrada}
-🎯 TP1: {tp1}
-🎯 TP2: {tp2}
-🎯 TP3: {tp3}
-🏁 Alvo final: {alvo}
+🎯 TP1 (50%): {tp1}
+🎯 TP2 (30%): {tp2}
+🎯 TP3 (20%): {tp3}
 ❌ Stop Loss: {sl}
 🧠 Critérios:"""
         for crit in melhor_criterios:
@@ -171,4 +170,4 @@ def analisar():
 enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) iniciado com sucesso!")
 while True:
     analisar()
-    time.sleep(20 * 60)  # A cada 20 minutos
+    time.sleep(20 * 60)  # Executa a cada 20 minutos
