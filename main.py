@@ -48,14 +48,6 @@ def obter_dados(par, intervalo="1h", limite=200):
         print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
-def detectar_formacoes(df):
-    ult = df.iloc[-1]
-    corpo = abs(ult["open"] - ult["close"])
-    sombra_inf = ult["low"] - min(ult["open"], ult["close"])
-    if corpo < sombra_inf and sombra_inf > corpo * 2:
-        return True
-    return False
-
 def calcular_score(df1h, df5m, df15m, df30m):
     score = 0
     criterios = []
@@ -98,7 +90,7 @@ def calcular_score(df1h, df5m, df15m, df30m):
     # Suporte e Resistência
     suporte = min(df1h["close"].tail(20))
     resistencia = max(df1h["close"].tail(20))
-    margem = 0.02  # Alterado de 1% para 2%
+    margem = 0.02  # 2% de margem
     if abs(close - suporte) / close < margem:
         score += 1
         criterios.append("Suporte próximo")
@@ -106,24 +98,19 @@ def calcular_score(df1h, df5m, df15m, df30m):
         score += 1
         criterios.append("Resistência próxima")
 
-    # Formações gráficas
-    if detectar_formacoes(df5m):
-        score += 1
-        criterios.append("Formação gráfica detectada")
-
     return score, criterios, tipo
+
+def registrar_sinal(par, score, criterios, tipo):
+    agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    linha = f"{agora},{par},{score},{tipo},{'|'.join(criterios)}\n"
+    with open(CSV_FILE, "a") as f:
+        f.write(linha)
 
 def analisar():
     pares = buscar_pares_futuros_usdt()
     if not pares:
         enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
         return
-
-    melhor_score = 0
-    melhor_par = None
-    melhor_criterios = []
-    melhor_tipo = "Indefinido"
-    melhor_preco = 0.0
 
     for par in pares:
         df1h = obter_dados(par, "1h")
@@ -134,19 +121,20 @@ def analisar():
             continue
 
         score, criterios, tipo = calcular_score(df1h, df5m, df15m, df30m)
-        preco = df1h["close"].iloc[-1]
-
-        if score > melhor_score:
-            melhor_score = score
-            melhor_par = par
-            melhor_criterios = criterios
-            melhor_tipo = tipo
-            melhor_preco = preco
-
-    if melhor_score >= 4:  # Ajustado para detectar sinais com score >= 4
-        enviar_telegram(f"Sinal encontrado no par {melhor_par} com score {melhor_score}!")
-    else:
-        enviar_telegram("⚠️ Nenhum sinal forte e confiável identificado.")
+        if score >= 4:  # Critério para sinal forte
+            preco = df1h["close"].iloc[-1]
+            registrar_sinal(par, score, criterios, tipo)
+            hora = datetime.utcnow().strftime("%H:%M:%S UTC")
+            msg = f"""✅ Sinal forte detectado!
+🕒 Horário: {hora}
+📊 Par: {par}
+📈 Score: {score}/6
+📌 Tipo de sinal: {tipo}
+💵 Preço atual: {preco}
+🧠 Critérios:"""
+            for crit in criterios:
+                msg += f"\n• {crit}"
+            enviar_telegram(msg)
 
 # === INÍCIO DO BOT ===
 enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) atualizado e iniciado com sucesso!")
