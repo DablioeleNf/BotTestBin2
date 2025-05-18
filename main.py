@@ -1,150 +1,89 @@
 import requests
-import pandas as pd
 import time
-from datetime import datetime, timedelta
-from ta.trend import ADXIndicator, PSARIndicator
-from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
+from datetime import datetime
 
-# Configurações do bot
-TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
-CHAT_ID = "719387436"
-CSV_FILE = "sinais_registrados.csv"
-TEMPO_MINIMO = 10  # Tempo mínimo em minutos entre sinais do mesmo par
+# Configurações globais
+WAIT_TIME = 600  # Tempo de espera em segundos (10 minutos)
+last_signals = {}  # Dicionário para rastrear últimos sinais enviados por par
 
-# Endpoints das exchanges
-ENDPOINTS = {
-    "binance": "https://fapi.binance.com",
-    "bybit": "https://api.bybit.com"
-}
-
-# Dicionário para controlar o tempo do último sinal enviado para cada par
-ultimo_sinal = {}
-
-def enviar_telegram(mensagem):
-    """Envia uma mensagem para o Telegram."""
+def fetch_bybit_symbols():
+    url = "https://api.bybit.com/v2/public/symbols"
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": mensagem}
-        )
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("result", [])
+        else:
+            print(f"Erro ao buscar pares na Bybit: {response.status_code} - {response.text}")
+            return []
     except Exception as e:
-        print(f"Erro Telegram: {e}")
-
-def buscar_pares(exchange):
-    """Busca os pares USDT disponíveis em cada exchange."""
-    try:
-        if exchange == "binance":
-            url = f"{ENDPOINTS['binance']}/fapi/v1/exchangeInfo"
-            r = requests.get(url, timeout=10).json()
-            return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT")]
-        elif exchange == "bybit":
-            url = f"{ENDPOINTS['bybit']}/v5/market/symbols"
-            r = requests.get(url, timeout=10).json()
-            return [s["symbol"] for s in r["result"]["list"] if s["symbol"].endswith("USDT")]
-    except Exception as e:
-        print(f"Erro ao buscar pares na {exchange}: {e}")
+        print(f"Erro de conexão com Bybit: {e}")
         return []
 
-def obter_dados(exchange, par, intervalo="1h", limite=200):
-    """Obtém os dados de candle para o par especificado."""
+def fetch_binance_symbols():
+    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
     try:
-        if exchange == "binance":
-            url = f"{ENDPOINTS['binance']}/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
-        elif exchange == "bybit":
-            intervalo_bybit = {"1h": 60, "5m": 5, "15m": 15, "30m": 30}[intervalo]
-            url = f"{ENDPOINTS['bybit']}/v5/market/kline?symbol={par}&interval={intervalo_bybit}&limit={limite}"
-        
-        r = requests.get(url, timeout=10).json()
-        data = r if isinstance(r, list) else r.get("result", {}).get("list", [])
-        if data:
-            df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["close"] = df["close"].astype(float)
-            df["open"] = df["open"].astype(float)
-            df["high"] = df["high"].astype(float)
-            df["low"] = df["low"].astype(float)
-            df["volume"] = df["volume"].astype(float)
-            return df
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            return [symbol['symbol'] for symbol in data.get('symbols', [])]
+        else:
+            print(f"Erro ao buscar pares na Binance: {response.status_code} - {response.text}")
+            return []
     except Exception as e:
-        print(f"Erro ao obter dados do par {par} na {exchange}: {e}")
-        return None
+        print(f"Erro de conexão com Binance: {e}")
+        return []
 
-def calcular_score(df1h):
-    """Calcula o score com base em indicadores técnicos."""
-    score = 0
-    criterios = []
-    tipo = "Indefinido"
+def analyze_pair(pair):
+    # Simulação de análise técnica
+    analysis = {
+        "entry_price": 100.0,
+        "take_profits": [105.0, 110.0, 115.0],
+        "stop_loss": 95.0,
+        "timestamp": datetime.now().isoformat()
+    }
+    return analysis
 
-    # RSI
-    rsi = RSIIndicator(df1h["close"]).rsi().iloc[-1]
-    if rsi > 70:
-        score += 1
-        criterios.append("RSI sobrecomprado")
-        tipo = "Venda"
-    elif rsi < 30:
-        score += 1
-        criterios.append("RSI sobrevendido")
-        tipo = "Compra"
+def send_signal(pair, analysis):
+    global last_signals
 
-    # ADX
-    adx = ADXIndicator(df1h["high"], df1h["low"], df1h["close"]).adx().iloc[-1]
-    if adx > 25:
-        score += 1
-        criterios.append("Tendência forte detectada (ADX)")
+    # Verificar se já foi enviado sinal recentemente
+    current_time = time.time()
+    if pair in last_signals and current_time - last_signals[pair] < WAIT_TIME:
+        print(f"Sinal para {pair} ignorado. Último sinal enviado há menos de {WAIT_TIME} segundos.")
+        return
 
-    # SAR Parabólico
-    psar = PSARIndicator(df1h["high"], df1h["low"], df1h["close"]).psar().iloc[-1]
-    if df1h["close"].iloc[-1] > psar:
-        criterios.append("SAR tendência de alta")
-    else:
-        criterios.append("SAR tendência de baixa")
+    # Enviar sinal (simulação de envio)
+    print(f"Enviando sinal para {pair}...")
+    print(f"Entrada: {analysis['entry_price']}")
+    print(f"TPs: {analysis['take_profits']}")
+    print(f"SL: {analysis['stop_loss']}")
+    print(f"Análise gerada em: {analysis['timestamp']}")
 
-    return score, criterios, tipo
+    # Atualizar o tempo do último sinal
+    last_signals[pair] = current_time
 
-def registrar_sinal(exchange, par, score, criterios, tipo):
-    """Registra os sinais no arquivo CSV."""
-    agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    linha = f"{agora},{exchange},{par},{score},{tipo},{'|'.join(criterios)}\n"
-    with open(CSV_FILE, "a") as f:
-        f.write(linha)
+def main():
+    while True:
+        print("Buscando pares na Bybit...")
+        bybit_symbols = fetch_bybit_symbols()
+        print(f"Pares encontrados na Bybit: {len(bybit_symbols)}")
 
-def analisar():
-    """Analisa os pares nas exchanges e gera sinais."""
-    for exchange in ["binance", "bybit"]:
-        pares = buscar_pares(exchange)
-        if not pares:
-            enviar_telegram(f"❌ Erro ao buscar pares na {exchange.capitalize()}.")
-            continue
+        print("Buscando pares na Binance...")
+        binance_symbols = fetch_binance_symbols()
+        print(f"Pares encontrados na Binance: {len(binance_symbols)}")
 
-        for par in pares:
-            agora = datetime.utcnow()
-            if par in ultimo_sinal and agora - ultimo_sinal[par] < timedelta(minutes=TEMPO_MINIMO):
-                continue
+        all_pairs = bybit_symbols + binance_symbols
 
-            df1h = obter_dados(exchange, par, "1h")
-            if df1h is None:
-                continue
+        if all_pairs:
+            for pair in all_pairs[:5]:  # Limitar para análise inicial de 5 pares
+                analysis = analyze_pair(pair)
+                send_signal(pair, analysis)
+        else:
+            print("Nenhum par encontrado para análise.")
 
-            score, criterios, tipo = calcular_score(df1h)
-            if score >= 4:  # Critério para sinal forte
-                preco = df1h["close"].iloc[-1]
-                registrar_sinal(exchange, par, score, criterios, tipo)
-                hora = agora.strftime("%H:%M:%S UTC")
-                msg = f"""✅ Sinal forte detectado!
-🕒 Horário: {hora}
-📊 Exchange: {exchange.capitalize()}
-📊 Par: {par}
-📈 Score: {score}/6
-📌 Tipo de sinal: {tipo}
-💵 Preço atual: {preco}
-🧠 Critérios:"""
-                for crit in criterios:
-                    msg += f"\n• {crit}"
-                enviar_telegram(msg)
-                ultimo_sinal[par] = agora
+        print(f"Aguardando {WAIT_TIME // 60} minutos para a próxima execução...")
+        time.sleep(WAIT_TIME)
 
-# === INÍCIO DO BOT ===
-enviar_telegram("🤖 Bot de sinais cripto 24h (Binance e Bybit) atualizado e iniciado com sucesso!")
-while True:
-    analisar()
-    time.sleep(60)
+if __name__ == "__main__":
+    main()
