@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+import time
 import ta
 from datetime import datetime
 
@@ -9,15 +10,17 @@ CHAT_ID = "719387436"
 CSV_FILE = "sinais_registrados.csv"
 
 def enviar_telegram(mensagem):
+    """Envia uma mensagem para o Telegram."""
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": mensagem}
         )
     except Exception as e:
-        print(f"Erro ao enviar mensagem no Telegram: {e}")
+        print(f"Erro ao enviar mensagem para o Telegram: {e}")
 
 def buscar_pares_futuros_usdt():
+    """Busca pares futuros USDT na Binance."""
     try:
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, timeout=10).json()
@@ -27,6 +30,7 @@ def buscar_pares_futuros_usdt():
         return []
 
 def obter_dados(par, intervalo="1h", limite=200):
+    """Obtém dados de velas para um par específico."""
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
     try:
         r = requests.get(url, timeout=10).json()
@@ -47,6 +51,7 @@ def obter_dados(par, intervalo="1h", limite=200):
         return None
 
 def detectar_formacoes(df):
+    """Detecta formações gráficas básicas no gráfico de 5m."""
     ult = df.iloc[-1]
     corpo = abs(ult["open"] - ult["close"])
     sombra_inf = ult["low"] - min(ult["open"], ult["close"])
@@ -55,6 +60,7 @@ def detectar_formacoes(df):
     return False
 
 def calcular_score(df1h, df5m):
+    """Calcula o score do par com base em critérios técnicos."""
     score = 0
     criterios = []
     tipo = "Indefinido"
@@ -106,16 +112,24 @@ def calcular_score(df1h, df5m):
     return score, criterios, tipo
 
 def registrar_sinal(par, score, criterios, tipo, confiavel):
+    """Registra o sinal no arquivo CSV."""
     agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     linha = f"{agora},{par},{score},{tipo},{'|'.join(criterios)},{'Sim' if confiavel else 'Não'}\n"
     with open(CSV_FILE, "a") as f:
         f.write(linha)
 
 def analisar():
+    """Realiza a análise de pares e identifica possíveis sinais."""
     pares = buscar_pares_futuros_usdt()
-    if not pares:
-        enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
+    if not pares:  # Verifica se a lista de pares está vazia
+        enviar_telegram("❌ Erro ao buscar pares futuros na Binance. Verifique a conexão ou a API.")
         return
+
+    melhor_score = 0
+    melhor_par = None
+    melhor_criterios = []
+    melhor_tipo = "Indefinido"
+    melhor_preco = 0.0
 
     for par in pares:
         df1h = obter_dados(par, "1h")
@@ -127,30 +141,38 @@ def analisar():
         preco = df1h["close"].iloc[-1]
         registrar_sinal(par, score, criterios, tipo, score >= 5)
 
-        if score >= 5 and tipo in ["Compra", "Venda"]:
-            entrada = preco
-            tp1 = round(entrada * (1.01 if tipo == "Compra" else 0.99), 4)
-            tp2 = round(entrada * (1.02 if tipo == "Compra" else 0.98), 4)
-            tp3 = round(entrada * (1.03 if tipo == "Compra" else 0.97), 4)
-            sl = round(entrada * (0.985 if tipo == "Compra" else 1.015), 4)
-            hora = datetime.utcnow().strftime("%H:%M:%S UTC")
+        if score > melhor_score:
+            melhor_score = score
+            melhor_par = par
+            melhor_criterios = criterios
+            melhor_tipo = tipo
+            melhor_preco = preco
 
-            msg = f"""✅ Sinal forte detectado!
+    if melhor_score >= 5 and melhor_tipo in ["Compra", "Venda"]:
+        entrada = melhor_preco
+        tp1 = round(entrada * (1.01 if melhor_tipo == "Compra" else 0.99), 4)
+        tp2 = round(entrada * (1.02 if melhor_tipo == "Compra" else 0.98), 4)
+        tp3 = round(entrada * (1.03 if melhor_tipo == "Compra" else 0.97), 4)
+        sl = round(entrada * (0.985 if melhor_tipo == "Compra" else 1.015), 4)
+        hora = datetime.utcnow().strftime("%H:%M:%S UTC")
+
+        msg = f"""✅ Sinal forte detectado!
 🕒 Horário: {hora}
-📊 Par: {par}
-📈 Score: {score}/6
-📌 Tipo de sinal: {tipo}
+📊 Par: {melhor_par}
+📈 Score: {melhor_score}/6
+📌 Tipo de sinal: {melhor_tipo}
 💵 Entrada: {entrada}
 🎯 TP1 (50%): {tp1}
 🎯 TP2 (30%): {tp2}
 🎯 TP3 (20%): {tp3}
 ❌ Stop Loss: {sl}
 🧠 Critérios:"""
-            for crit in criterios:
-                msg += f"\n• {crit}"
-            enviar_telegram(msg)
+        for crit in melhor_criterios:
+            msg += f"\n• {crit}"
+        enviar_telegram(msg)
 
 # === INÍCIO DO BOT ===
-enviar_telegram("🤖 Bot de sinais cripto 24h iniciado com sucesso!")
+enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) iniciado com sucesso!")
 while True:
-    analisar()  # Executa a análise continuamente sem intervalo fixo.
+    analisar()
+    time.sleep(10)  # Redução do intervalo para reanalisar com frequência
