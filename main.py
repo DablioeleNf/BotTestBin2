@@ -56,9 +56,7 @@ def obter_dados(exchange, par, intervalo="1h", limite=200):
         if isinstance(r, list) or "result" in r:
             data = r if isinstance(r, list) else r["result"]
             df = pd.DataFrame(data, columns=[
-                "timestamp", "open", "high", "low", "close", "volume",
-                "close_time", "quote_asset_volume", "num_trades",
-                "taker_buy_base", "taker_buy_quote", "ignore"
+                "timestamp", "open", "high", "low", "close", "volume"
             ])
             df["close"] = df["close"].astype(float)
             df["open"] = df["open"].astype(float)
@@ -120,7 +118,14 @@ def calcular_score(df1h, df5m, df15m, df30m):
         score += 1
         criterios.append("Resistência próxima")
 
-    return score, criterios, tipo
+    # Valores de entrada, stop loss e TPs
+    entrada = close
+    stop_loss = close * (0.98 if tipo == "Compra" else 1.02)
+    take_profits = [close * (1.02 if tipo == "Compra" else 0.98),
+                    close * (1.04 if tipo == "Compra" else 0.96),
+                    close * (1.06 if tipo == "Compra" else 0.94)]
+
+    return score, criterios, tipo, entrada, stop_loss, take_profits
 
 def registrar_sinal(exchange, par, score, criterios, tipo):
     agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -143,7 +148,7 @@ def analisar():
             if df1h is None or df5m is None or df15m is None or df30m is None:
                 continue
 
-            score, criterios, tipo = calcular_score(df1h, df5m, df15m, df30m)
+            score, criterios, tipo, entrada, stop_loss, take_profits = calcular_score(df1h, df5m, df15m, df30m)
             if score >= 4:  # Critério para sinal forte
                 preco = df1h["close"].iloc[-1]
                 registrar_sinal(exchange, par, score, criterios, tipo)
@@ -155,6 +160,12 @@ def analisar():
 📈 Score: {score}/6
 📌 Tipo de sinal: {tipo}
 💵 Preço atual: {preco}
+🎯 Valor de entrada: {entrada:.2f}
+🚨 Stop Loss: {stop_loss:.2f}
+🎯 Take Profits:
+• TP1: {take_profits[0]:.2f}
+• TP2: {take_profits[1]:.2f}
+• TP3: {take_profits[2]:.2f}
 🧠 Critérios:"""
                 for crit in criterios:
                     msg += f"\n• {crit}"
