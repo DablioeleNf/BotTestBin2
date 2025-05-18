@@ -10,6 +10,12 @@ TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
 CHAT_ID = "719387436"
 CSV_FILE = "sinais_registrados.csv"
 
+# Endpoints das exchanges
+ENDPOINTS = {
+    "binance": "https://fapi.binance.com",
+    "bybit": "https://api.bybit.com"
+}
+
 def enviar_telegram(mensagem):
     try:
         requests.post(
@@ -19,21 +25,37 @@ def enviar_telegram(mensagem):
     except Exception as e:
         print(f"Erro Telegram: {e}")
 
-def buscar_pares_futuros_usdt():
+def buscar_pares(exchange):
+    """
+    Busca todos os pares disponíveis para a exchange especificada.
+    """
     try:
-        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-        r = requests.get(url, timeout=10).json()
-        return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
+        if exchange == "binance":
+            url = f"{ENDPOINTS['binance']}/fapi/v1/exchangeInfo"
+            r = requests.get(url, timeout=10).json()
+            return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT")]
+        elif exchange == "bybit":
+            url = f"{ENDPOINTS['bybit']}/v2/public/symbols"
+            r = requests.get(url, timeout=10).json()
+            return [s["name"] for s in r["result"] if s["name"].endswith("USDT")]
     except Exception as e:
-        print(f"Erro ao buscar pares: {e}")
+        print(f"Erro ao buscar pares na {exchange}: {e}")
         return []
 
-def obter_dados(par, intervalo="1h", limite=200):
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
+def obter_dados(exchange, par, intervalo="1h", limite=200):
+    """
+    Busca dados de candles (OHLCV) da exchange especificada.
+    """
     try:
+        if exchange == "binance":
+            url = f"{ENDPOINTS['binance']}/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
+        elif exchange == "bybit":
+            url = f"{ENDPOINTS['bybit']}/v2/public/kline/list?symbol={par}&interval={intervalo}&limit={limite}"
+        
         r = requests.get(url, timeout=10).json()
-        if isinstance(r, list):
-            df = pd.DataFrame(r, columns=[
+        if isinstance(r, list) or "result" in r:
+            data = r if isinstance(r, list) else r["result"]
+            df = pd.DataFrame(data, columns=[
                 "timestamp", "open", "high", "low", "close", "volume",
                 "close_time", "quote_asset_volume", "num_trades",
                 "taker_buy_base", "taker_buy_quote", "ignore"
@@ -45,7 +67,7 @@ def obter_dados(par, intervalo="1h", limite=200):
             df["volume"] = df["volume"].astype(float)
             return df
     except Exception as e:
-        print(f"Erro ao obter dados do par {par}: {e}")
+        print(f"Erro ao obter dados do par {par} na {exchange}: {e}")
         return None
 
 def calcular_score(df1h, df5m, df15m, df30m):
@@ -100,44 +122,46 @@ def calcular_score(df1h, df5m, df15m, df30m):
 
     return score, criterios, tipo
 
-def registrar_sinal(par, score, criterios, tipo):
+def registrar_sinal(exchange, par, score, criterios, tipo):
     agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    linha = f"{agora},{par},{score},{tipo},{'|'.join(criterios)}\n"
+    linha = f"{agora},{exchange},{par},{score},{tipo},{'|'.join(criterios)}\n"
     with open(CSV_FILE, "a") as f:
         f.write(linha)
 
 def analisar():
-    pares = buscar_pares_futuros_usdt()
-    if not pares:
-        enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
-        return
-
-    for par in pares:
-        df1h = obter_dados(par, "1h")
-        df5m = obter_dados(par, "5m")
-        df15m = obter_dados(par, "15m")
-        df30m = obter_dados(par, "30m")
-        if df1h is None or df5m is None or df15m is None or df30m is None:
+    for exchange in ["binance", "bybit"]:
+        pares = buscar_pares(exchange)
+        if not pares:
+            enviar_telegram(f"❌ Erro ao buscar pares na {exchange.capitalize()}.")
             continue
 
-        score, criterios, tipo = calcular_score(df1h, df5m, df15m, df30m)
-        if score >= 4:  # Critério para sinal forte
-            preco = df1h["close"].iloc[-1]
-            registrar_sinal(par, score, criterios, tipo)
-            hora = datetime.utcnow().strftime("%H:%M:%S UTC")
-            msg = f"""✅ Sinal forte detectado!
+        for par in pares:
+            df1h = obter_dados(exchange, par, "1h")
+            df5m = obter_dados(exchange, par, "5m")
+            df15m = obter_dados(exchange, par, "15m")
+            df30m = obter_dados(exchange, par, "30m")
+            if df1h is None or df5m is None or df15m is None or df30m is None:
+                continue
+
+            score, criterios, tipo = calcular_score(df1h, df5m, df15m, df30m)
+            if score >= 4:  # Critério para sinal forte
+                preco = df1h["close"].iloc[-1]
+                registrar_sinal(exchange, par, score, criterios, tipo)
+                hora = datetime.utcnow().strftime("%H:%M:%S UTC")
+                msg = f"""✅ Sinal forte detectado!
 🕒 Horário: {hora}
+📊 Exchange: {exchange.capitalize()}
 📊 Par: {par}
 📈 Score: {score}/6
 📌 Tipo de sinal: {tipo}
 💵 Preço atual: {preco}
 🧠 Critérios:"""
-            for crit in criterios:
-                msg += f"\n• {crit}"
-            enviar_telegram(msg)
+                for crit in criterios:
+                    msg += f"\n• {crit}"
+                enviar_telegram(msg)
 
 # === INÍCIO DO BOT ===
-enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) atualizado e iniciado com sucesso!")
+enviar_telegram("🤖 Bot de sinais cripto 24h (Binance e Bybit) atualizado e iniciado com sucesso!")
 while True:
     analisar()
     time.sleep(60)
