@@ -3,27 +3,35 @@ import pandas as pd
 import time
 import ta
 from datetime import datetime, timedelta
-from ta.trend import ADXIndicator
+from ta.trend import ADXIndicator, EMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
 
 # Configurações do bot
-TOKEN = "SEU_TOKEN_TELEGRAM"
-CHAT_ID = "SEU_CHAT_ID_TELEGRAM"
-RISCO_PERCENTUAL = 0.02  # 2% de risco
+TOKEN = "SEU_TOKEN_TELEGRAM"  # Substitua pelo seu token
+CHAT_ID = "SEU_CHAT_ID_TELEGRAM"  # Substitua pelo ID do seu chat
+SALDO_TOTAL = 1000.0  # Saldo total em dólares (simulado)
+RISCO_PERCENTUAL = 0.02  # Percentual de risco por operação (2%)
 TEMPO_ESPERA = timedelta(minutes=10)  # Espera entre sinais do mesmo par
 
 sinais_enviados = {}
 
+# Função para enviar mensagens ao Telegram
 def enviar_telegram(mensagem):
     try:
-        requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": mensagem, "parse_mode": "Markdown"}
         )
+        if response.status_code == 200:
+            print("✅ Mensagem enviada ao Telegram.")
+        else:
+            print(f"⚠️ Erro ao enviar mensagem. Status code: {response.status_code}")
+            print(response.json())
     except Exception as e:
         print(f"Erro Telegram: {e}")
 
+# Buscar pares futuros USDT na Binance
 def buscar_pares_futuros_usdt():
     try:
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
@@ -33,6 +41,7 @@ def buscar_pares_futuros_usdt():
         print(f"Erro ao buscar pares: {e}")
         return []
 
+# Obter dados do par de moedas
 def obter_dados(par, intervalo="1h", limite=200):
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
     try:
@@ -53,6 +62,7 @@ def obter_dados(par, intervalo="1h", limite=200):
         print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
+# Analisar sinais usando indicadores técnicos
 def calcular_score(df):
     score = 0
     criterios = []
@@ -71,15 +81,21 @@ def calcular_score(df):
 
     # ADX
     adx = ADXIndicator(df["high"], df["low"], df["close"]).adx().iloc[-1]
-    di_plus = ADXIndicator(df["high"], df["low"], df["close"]).adx_pos().iloc[-1]
-    di_minus = ADXIndicator(df["high"], df["low"], df["close"]).adx_neg().iloc[-1]
     if adx > 25:
         score += 1
-        criterios.append("Tendência forte (ADX)")
-        if di_plus > di_minus:
-            tipo = "Compra"
-        else:
-            tipo = "Venda"
+        criterios.append("Tendência forte detectada (ADX)")
+
+    # EMA (Média Móvel Exponencial)
+    ema_short = EMAIndicator(df["close"], window=9).ema_indicator().iloc[-1]
+    ema_long = EMAIndicator(df["close"], window=21).ema_indicator().iloc[-1]
+    if ema_short > ema_long:
+        score += 1
+        criterios.append("Tendência de alta confirmada (EMA)")
+        tipo = "Compra"
+    elif ema_short < ema_long:
+        score += 1
+        criterios.append("Tendência de baixa confirmada (EMA)")
+        tipo = "Venda"
 
     # Bollinger Bands
     bb = BollingerBands(df["close"])
@@ -100,37 +116,7 @@ def calcular_score(df):
 
     return score, criterios, tipo
 
-def calcular_preco_entrada(close, suporte, resistencia, tipo, margem=0.002):
-    if tipo == "Compra":
-        preco_entrada = max(close, suporte * (1 + margem))
-    elif tipo == "Venda":
-        preco_entrada = min(close, resistencia * (1 - margem))
-    else:
-        preco_entrada = close
-    return round(preco_entrada, 2)
-
-def calcular_stop_loss(preco_entrada, tipo, risco=RISCO_PERCENTUAL):
-    if tipo == "Compra":
-        stop_loss = preco_entrada * (1 - risco)
-    elif tipo == "Venda":
-        stop_loss = preco_entrada * (1 + risco)
-    else:
-        stop_loss = preco_entrada
-    return round(stop_loss, 2)
-
-def calcular_take_profits(preco_entrada, tipo, risco=RISCO_PERCENTUAL):
-    if tipo == "Compra":
-        tp1 = round(preco_entrada * (1 + risco), 2)
-        tp2 = round(preco_entrada * (1 + 2 * risco), 2)
-        tp3 = round(preco_entrada * (1 + 3 * risco), 2)
-    elif tipo == "Venda":
-        tp1 = round(preco_entrada * (1 - risco), 2)
-        tp2 = round(preco_entrada * (1 - 2 * risco), 2)
-        tp3 = round(preco_entrada * (1 - 3 * risco), 2)
-    else:
-        tp1, tp2, tp3 = preco_entrada, preco_entrada, preco_entrada
-    return tp1, tp2, tp3
-
+# Analisar pares para gerar sinais
 def analisar():
     pares = buscar_pares_futuros_usdt()
     if not pares:
@@ -140,7 +126,7 @@ def analisar():
     for par in pares:
         agora = datetime.utcnow()
         if par in sinais_enviados and agora - sinais_enviados[par] < TEMPO_ESPERA:
-            continue  # Pular pares que receberam sinal recentemente
+            continue
 
         df = obter_dados(par, "1h")
         if df is None:
@@ -149,27 +135,13 @@ def analisar():
         score, criterios, tipo = calcular_score(df)
         if score >= 4:
             close = df["close"].iloc[-1]
-            suporte = min(df["low"].tail(20))
-            resistencia = max(df["high"].tail(20))
-
-            preco_entrada = calcular_preco_entrada(close, suporte, resistencia, tipo)
-            stop_loss = calcular_stop_loss(preco_entrada, tipo)
-            tp1, tp2, tp3 = calcular_take_profits(preco_entrada, tipo)
-            alvo_final = tp3
-
             hora = agora.strftime("%H:%M:%S UTC")
-            msg = f"""✅ *Sinal forte detectado!*
+            msg = f"""✅ *Sinal detectado!*
 🕒 *Horário:* {hora}
 📊 *Par:* `{par}`
 📈 *Score:* `{score}/6`
 📌 *Tipo de sinal:* `{tipo}`
-💵 *Preço atual:* `{close:.2f}`
-🎯 *Preço de entrada:* `{preco_entrada}`
-🎯 *Take Profit 1:* `{tp1}`
-🎯 *Take Profit 2:* `{tp2}`
-🎯 *Take Profit 3:* `{tp3}`
-🎯 *Alvo final:* `{alvo_final}`
-❌ *Stop Loss:* `{stop_loss}`
+💵 *Preço atual:* `{close}`
 🧠 *Critérios:*"""
             for crit in criterios:
                 msg += f"\n• {crit}"
@@ -178,7 +150,7 @@ def analisar():
             sinais_enviados[par] = agora
 
 # === INÍCIO DO BOT ===
-enviar_telegram("🤖 *Bot de sinais cripto iniciado!*")
+enviar_telegram("🤖 *Bot de sinais cripto atualizado e iniciado!*")
 while True:
     analisar()
     time.sleep(60)
