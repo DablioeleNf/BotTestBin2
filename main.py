@@ -3,13 +3,12 @@ import pandas as pd
 import time
 import ta
 from datetime import datetime
-from ta.trend import ADXIndicator, PSARIndicator
-from ta.volatility import AverageTrueRange
-from ta.momentum import RSIIndicator
+from ta.trend import ADXIndicator, PSARIndicator, MACD
+from ta.momentum import RSIIndicator, CCIIndicator
 
 # Configurações do bot
-TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
-CHAT_ID = "719387436"
+TOKEN = "SEU_TELEGRAM_BOT_TOKEN"
+CHAT_ID = "SEU_CHAT_ID"
 CSV_FILE = "sinais_registrados.csv"
 
 def enviar_telegram(mensagem):
@@ -50,40 +49,13 @@ def obter_dados(par, intervalo="1h", limite=200):
         print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
-# === Melhoria 1: Identificação de Contexto de Mercado ===
-def identificar_contexto(df):
-    atr = AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range().iloc[-1]
-    adx = ADXIndicator(df["high"], df["low"], df["close"]).adx().iloc[-1]
-
-    if adx > 25:
-        return "Tendência", atr
-    elif adx < 20:
-        return "Consolidação", atr
-    else:
-        return "Indefinido", atr
-
-# === Melhoria 2: Detecção de Divergências ===
-def detectar_divergencia(df):
-    rsi = RSIIndicator(df["close"]).rsi()
-    precos = df["close"]
-
-    if (precos.iloc[-2] > precos.iloc[-1]) and (rsi.iloc[-2] < rsi.iloc[-1]):
-        return "Divergência de alta detectada (RSI)"
-    elif (precos.iloc[-2] < precos.iloc[-1]) and (rsi.iloc[-2] > rsi.iloc[-1]):
-        return "Divergência de baixa detectada (RSI)"
-    return None
-
 def calcular_score(df1h, df5m, df15m, df30m):
     score = 0
     criterios = []
     tipo = "Indefinido"
 
-    # === Contexto do Mercado ===
-    contexto, atr = identificar_contexto(df1h)
-    criterios.append(f"Contexto de mercado: {contexto} (ATR: {atr:.2f})")
-
-    # === RSI ===
-    rsi = ta.momentum.RSIIndicator(df1h["close"]).rsi().iloc[-1]
+    # RSI
+    rsi = RSIIndicator(df1h["close"]).rsi().iloc[-1]
     if rsi > 70:
         score += 1
         criterios.append("RSI sobrecomprado")
@@ -93,25 +65,64 @@ def calcular_score(df1h, df5m, df15m, df30m):
         criterios.append("RSI sobrevendido")
         tipo = "Compra"
 
-    # === Divergência ===
-    divergencia = detectar_divergencia(df1h)
-    if divergencia:
-        score += 1
-        criterios.append(divergencia)
-
-    # === Outros indicadores (Mantidos como antes) ===
+    # ADX
     adx = ADXIndicator(df1h["high"], df1h["low"], df1h["close"]).adx().iloc[-1]
     if adx > 25:
         score += 1
         criterios.append("Tendência forte detectada (ADX)")
 
+    # MACD
+    macd = MACD(df1h["close"])
+    if macd.macd_diff().iloc[-1] > 0:
+        score += 1
+        criterios.append("MACD cruzamento de alta")
+    else:
+        criterios.append("MACD cruzamento de baixa")
+
+    # CCI
+    cci = CCIIndicator(df1h["high"], df1h["low"], df1h["close"]).cci().iloc[-1]
+    if cci > 100:
+        score += 1
+        criterios.append("CCI forte tendência de alta")
+    elif cci < -100:
+        score += 1
+        criterios.append("CCI forte tendência de baixa")
+
+    # SAR Parabólico
     psar = PSARIndicator(df1h["high"], df1h["low"], df1h["close"]).psar().iloc[-1]
     if df1h["close"].iloc[-1] > psar:
         criterios.append("SAR tendência de alta")
     else:
         criterios.append("SAR tendência de baixa")
 
+    # Bollinger Bands
+    bb = ta.volatility.BollingerBands(df1h["close"])
+    close = df1h["close"].iloc[-1]
+    if close < bb.bollinger_lband().iloc[-1]:
+        score += 1
+        criterios.append("Bollinger abaixo da banda inferior")
+    elif close > bb.bollinger_hband().iloc[-1]:
+        score += 1
+        criterios.append("Bollinger acima da banda superior")
+
+    # Suporte e Resistência
+    suporte = min(df1h["close"].tail(20))
+    resistencia = max(df1h["close"].tail(20))
+    margem = 0.02  # 2% de margem
+    if abs(close - suporte) / close < margem:
+        score += 1
+        criterios.append("Suporte próximo")
+    elif abs(close - resistencia) / close < margem:
+        score += 1
+        criterios.append("Resistência próxima")
+
     return score, criterios, tipo
+
+def registrar_sinal(par, score, criterios, tipo):
+    agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    linha = f"{agora},{par},{score},{tipo},{'|'.join(criterios)}\n"
+    with open(CSV_FILE, "a") as f:
+        f.write(linha)
 
 def analisar():
     pares = buscar_pares_futuros_usdt()
@@ -135,7 +146,7 @@ def analisar():
             msg = f"""✅ Sinal forte detectado!
 🕒 Horário: {hora}
 📊 Par: {par}
-📈 Score: {score}/6
+📈 Score: {score}/7
 📌 Tipo de sinal: {tipo}
 💵 Preço atual: {preco}
 🧠 Critérios:"""
@@ -144,7 +155,7 @@ def analisar():
             enviar_telegram(msg)
 
 # === INÍCIO DO BOT ===
-enviar_telegram("🤖 Bot de sinais cripto atualizado e iniciado com melhorias!")
+enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) atualizado e iniciado com sucesso!")
 while True:
     analisar()
     time.sleep(60)
