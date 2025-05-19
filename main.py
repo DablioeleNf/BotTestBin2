@@ -3,30 +3,21 @@ import pandas as pd
 import time
 import ta
 from datetime import datetime
-from ta.trend import ADXIndicator, PSARIndicator, MACD
-from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
-import logging
+from ta.trend import ADXIndicator, PSARIndicator
 
 # Configurações do bot
 TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
 CHAT_ID = "719387436"
 CSV_FILE = "sinais_registrados.csv"
-LOG_FILE = "bot_logs.log"
-
-# Configuração de logging
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
-                    format="%(asctime)s - %(levelname)s - %(message)s")
 
 def enviar_telegram(mensagem):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": mensagem},
-            timeout=10
+            data={"chat_id": CHAT_ID, "text": mensagem}
         )
     except Exception as e:
-        logging.error(f"Erro Telegram: {e}")
+        print(f"Erro Telegram: {e}")
 
 def buscar_pares_futuros_usdt():
     try:
@@ -34,7 +25,7 @@ def buscar_pares_futuros_usdt():
         r = requests.get(url, timeout=10).json()
         return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
     except Exception as e:
-        logging.error(f"Erro ao buscar pares: {e}")
+        print(f"Erro ao buscar pares: {e}")
         return []
 
 def obter_dados(par, intervalo="1h", limite=200):
@@ -54,105 +45,89 @@ def obter_dados(par, intervalo="1h", limite=200):
             df["volume"] = df["volume"].astype(float)
             return df
     except Exception as e:
-        logging.error(f"Erro ao obter dados do par {par}: {e}")
+        print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
 def calcular_score(df1h, df5m, df15m, df30m):
     score = 0
     criterios = []
     tipo = "Indefinido"
-    close = df1h["close"].iloc[-1]
 
     # RSI
-    rsi = RSIIndicator(df1h["close"]).rsi().iloc[-1]
+    rsi = ta.momentum.RSIIndicator(df1h["close"]).rsi().iloc[-1]
     if rsi > 70:
-        score += 0.3
+        score += 1
         criterios.append("RSI sobrecomprado")
         tipo = "Venda"
     elif rsi < 30:
-        score += 0.3
+        score += 1
         criterios.append("RSI sobrevendido")
         tipo = "Compra"
 
     # ADX
     adx = ADXIndicator(df1h["high"], df1h["low"], df1h["close"]).adx().iloc[-1]
     if adx > 25:
-        score += 0.4
+        score += 1
         criterios.append("Tendência forte detectada (ADX)")
 
     # SAR Parabólico
     psar = PSARIndicator(df1h["high"], df1h["low"], df1h["close"]).psar().iloc[-1]
-    if close > psar:
+    if df1h["close"].iloc[-1] > psar:
         criterios.append("SAR tendência de alta")
     else:
         criterios.append("SAR tendência de baixa")
 
     # Bollinger Bands
-    bb = BollingerBands(df1h["close"])
+    bb = ta.volatility.BollingerBands(df1h["close"])
+    close = df1h["close"].iloc[-1]
     if close < bb.bollinger_lband().iloc[-1]:
-        score += 0.2
+        score += 1
         criterios.append("Bollinger abaixo da banda inferior")
     elif close > bb.bollinger_hband().iloc[-1]:
-        score += 0.2
+        score += 1
         criterios.append("Bollinger acima da banda superior")
-
-    # MACD
-    macd = MACD(df1h["close"]).macd_diff().iloc[-1]
-    if macd > 0:
-        score += 0.3
-        criterios.append("MACD indicando alta")
-    elif macd < 0:
-        score += 0.3
-        criterios.append("MACD indicando baixa")
 
     # Suporte e Resistência
     suporte = min(df1h["close"].tail(20))
     resistencia = max(df1h["close"].tail(20))
-    margem = 0.02
+    margem = 0.02  # 2% de margem
     if abs(close - suporte) / close < margem:
-        score += 0.2
+        score += 1
         criterios.append("Suporte próximo")
     elif abs(close - resistencia) / close < margem:
-        score += 0.2
+        score += 1
         criterios.append("Resistência próxima")
 
     return score, criterios, tipo, suporte, resistencia
 
-def calcular_risco_reward(preco_entrada, stop_loss, alvo):
-    risco = abs(preco_entrada - stop_loss)
-    recompensa = abs(alvo - preco_entrada)
-    if risco == 0:
-        return 0
-    return recompensa / risco
-
-def gerar_precos_entrada_stop_tp(tipo, close, suporte, resistencia):
-    margem_sl = 0.01  # 1% para stop loss
-    margem_tp = 0.03  # 3% entre tps
-
+def gerar_precos_entrada_stop_tp(tipo, preco_atual, suporte, resistencia):
+    # Define preço de entrada, stop loss e TPs baseados em tipo e níveis de suporte/resistência
     if tipo == "Compra":
-        preco_entrada = close
-        stop_loss = suporte * (1 - margem_sl)
-        alvo = resistencia
-        # 3 TPs escalonados entre entrada e alvo
-        tp1 = preco_entrada + (alvo - preco_entrada) * 0.33
-        tp2 = preco_entrada + (alvo - preco_entrada) * 0.66
-        tp3 = alvo
+        preco_entrada = preco_atual
+        stop_loss = suporte * 0.995  # Stop loss ligeiramente abaixo do suporte
+        range_tp = resistencia - preco_entrada
+        if range_tp <= 0:
+            return None, None, None, None, None
+        tp1 = preco_entrada + 0.3 * range_tp
+        tp2 = preco_entrada + 0.6 * range_tp
+        tp3 = preco_entrada + 1.0 * range_tp
     elif tipo == "Venda":
-        preco_entrada = close
-        stop_loss = resistencia * (1 + margem_sl)
-        alvo = suporte
-        # 3 TPs escalonados entre entrada e alvo (descendo)
-        tp1 = preco_entrada - (preco_entrada - alvo) * 0.33
-        tp2 = preco_entrada - (preco_entrada - alvo) * 0.66
-        tp3 = alvo
+        preco_entrada = preco_atual
+        stop_loss = resistencia * 1.005  # Stop loss ligeiramente acima da resistência
+        range_tp = preco_entrada - suporte
+        if range_tp <= 0:
+            return None, None, None, None, None
+        tp1 = preco_entrada - 0.3 * range_tp
+        tp2 = preco_entrada - 0.6 * range_tp
+        tp3 = preco_entrada - 1.0 * range_tp
     else:
         return None, None, None, None, None
 
     return preco_entrada, stop_loss, tp1, tp2, tp3
 
 def estimar_duracao_entrada():
-    # Estimativa simples: operação no timeframe 1h pode durar até 1 dia (24h)
-    return "Até 24 horas (timeframe 1h)"
+    # Pode ser aprimorada com análise de volatilidade ou volume, aqui é um placeholder
+    return "1-4 horas"
 
 def registrar_sinal(par, score, criterios, tipo, preco_entrada, stop_loss, tp1, tp2, tp3):
     agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -175,7 +150,7 @@ def analisar():
             continue
 
         score, criterios, tipo, suporte, resistencia = calcular_score(df1h, df5m, df15m, df30m)
-        if score >= 1.0:  # Critério para sinal forte
+        if score >= 4:  # Critério para sinal forte
             preco_entrada, stop_loss, tp1, tp2, tp3 = gerar_precos_entrada_stop_tp(tipo, df1h["close"].iloc[-1], suporte, resistencia)
             if None in (preco_entrada, stop_loss, tp1, tp2, tp3):
                 continue
@@ -186,3 +161,22 @@ def analisar():
 
             msg = f"""✅ Sinal forte detectado!
 🕒 Horário: {hora}
+📊 Par: {par}
+📈 Score: {score:.2f}
+📌 Tipo de sinal: {tipo}
+💵 Preço de entrada: {preco_entrada:.4f}
+⛔ Stop Loss: {stop_loss:.4f}
+🎯 Take Profit 1: {tp1:.4f}
+🎯 Take Profit 2: {tp2:.4f}
+🎯 Take Profit 3: {tp3:.4f}
+⏳ Duração estimada: {duracao}
+🧠 Critérios:"""
+            for crit in criterios:
+                msg += f"\n• {crit}"
+            enviar_telegram(msg)
+
+# === INÍCIO DO BOT ===
+enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) atualizado e iniciado com sucesso!")
+while True:
+    analisar()
+    time.sleep(60)
