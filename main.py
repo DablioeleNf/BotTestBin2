@@ -1,83 +1,119 @@
-import os
-import aiohttp
-import asyncio
+import requests
 import pandas as pd
+import time
 import ta
 from datetime import datetime
-from ta.trend import ADXIndicator, PSARIndicator
+from ta.trend import ADXIndicator, PSARIndicator, MACD
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands
+import logging
 
 # Configurações do bot
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
+CHAT_ID = "719387436"
 CSV_FILE = "sinais_registrados.csv"
+LOG_FILE = "bot_logs.log"
 
-if not TOKEN or not CHAT_ID:
-    raise ValueError("As variáveis de ambiente TOKEN e CHAT_ID devem estar configuradas.")
+# Configuração de logging
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, 
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 
-async def enviar_telegram(mensagem):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+def enviar_telegram(mensagem):
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data={"chat_id": CHAT_ID, "text": mensagem}) as response:
-                if response.status != 200:
-                    print(f"Erro ao enviar mensagem: {await response.text()}")
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": mensagem}
+        )
     except Exception as e:
-        print(f"Erro Telegram: {e}")
+        logging.error(f"Erro Telegram: {e}")
 
-async def buscar_pares_futuros_usdt():
-    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+def buscar_pares_futuros_usdt():
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                data = await response.json()
-                return [s["symbol"] for s in data["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        r = requests.get(url, timeout=10).json()
+        return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
     except Exception as e:
-        print(f"Erro ao buscar pares: {e}")
+        logging.error(f"Erro ao buscar pares: {e}")
         return []
 
-async def obter_dados(par, intervalo="1h", limite=200):
+def obter_dados(par, intervalo="1h", limite=200):
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                data = await response.json()
-                if isinstance(data, list):
-                    df = pd.DataFrame(data, columns=[
-                        "timestamp", "open", "high", "low", "close", "volume",
-                        "close_time", "quote_asset_volume", "num_trades",
-                        "taker_buy_base", "taker_buy_quote", "ignore"
-                    ])
-                    df["close"] = df["close"].astype(float)
-                    df["open"] = df["open"].astype(float)
-                    df["high"] = df["high"].astype(float)
-                    df["low"] = df["low"].astype(float)
-                    df["volume"] = df["volume"].astype(float)
-                    return df
+        r = requests.get(url, timeout=10).json()
+        if isinstance(r, list):
+            df = pd.DataFrame(r, columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "close_time", "quote_asset_volume", "num_trades",
+                "taker_buy_base", "taker_buy_quote", "ignore"
+            ])
+            df["close"] = df["close"].astype(float)
+            df["open"] = df["open"].astype(float)
+            df["high"] = df["high"].astype(float)
+            df["low"] = df["low"].astype(float)
+            df["volume"] = df["volume"].astype(float)
+            return df
     except Exception as e:
-        print(f"Erro ao obter dados do par {par}: {e}")
+        logging.error(f"Erro ao obter dados do par {par}: {e}")
         return None
 
-def calcular_score(df1h):
+def calcular_score(df1h, df5m, df15m, df30m):
     score = 0
     criterios = []
     tipo = "Indefinido"
+    close = df1h["close"].iloc[-1]
 
     # RSI
-    rsi = ta.momentum.RSIIndicator(df1h["close"]).rsi().iloc[-1]
+    rsi = RSIIndicator(df1h["close"]).rsi().iloc[-1]
     if rsi > 70:
-        score += 1
+        score += 0.3
         criterios.append("RSI sobrecomprado")
         tipo = "Venda"
     elif rsi < 30:
-        score += 1
+        score += 0.3
         criterios.append("RSI sobrevendido")
         tipo = "Compra"
 
     # ADX
     adx = ADXIndicator(df1h["high"], df1h["low"], df1h["close"]).adx().iloc[-1]
     if adx > 25:
-        score += 1
+        score += 0.4
         criterios.append("Tendência forte detectada (ADX)")
+
+    # SAR Parabólico
+    psar = PSARIndicator(df1h["high"], df1h["low"], df1h["close"]).psar().iloc[-1]
+    if df1h["close"].iloc[-1] > psar:
+        criterios.append("SAR tendência de alta")
+    else:
+        criterios.append("SAR tendência de baixa")
+
+    # Bollinger Bands
+    bb = BollingerBands(df1h["close"])
+    if close < bb.bollinger_lband().iloc[-1]:
+        score += 0.2
+        criterios.append("Bollinger abaixo da banda inferior")
+    elif close > bb.bollinger_hband().iloc[-1]:
+        score += 0.2
+        criterios.append("Bollinger acima da banda superior")
+
+    # MACD
+    macd = MACD(df1h["close"]).macd_diff().iloc[-1]
+    if macd > 0:
+        score += 0.3
+        criterios.append("MACD indicando alta")
+    elif macd < 0:
+        score += 0.3
+        criterios.append("MACD indicando baixa")
+
+    # Suporte e Resistência
+    suporte = min(df1h["close"].tail(20))
+    resistencia = max(df1h["close"].tail(20))
+    margem = 0.02
+    if abs(close - suporte) / close < margem:
+        score += 0.2
+        criterios.append("Suporte próximo")
+    elif abs(close - resistencia) / close < margem:
+        score += 0.2
+        criterios.append("Resistência próxima")
 
     return score, criterios, tipo
 
@@ -87,38 +123,38 @@ def registrar_sinal(par, score, criterios, tipo):
     with open(CSV_FILE, "a") as f:
         f.write(linha)
 
-async def analisar():
-    pares = await buscar_pares_futuros_usdt()
+def analisar():
+    pares = buscar_pares_futuros_usdt()
     if not pares:
-        await enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
+        enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
         return
 
     for par in pares:
-        df1h = await obter_dados(par, "1h")
-        if df1h is None:
+        df1h = obter_dados(par, "1h")
+        df5m = obter_dados(par, "5m")
+        df15m = obter_dados(par, "15m")
+        df30m = obter_dados(par, "30m")
+        if df1h is None or df5m is None or df15m is None or df30m is None:
             continue
 
-        score, criterios, tipo = calcular_score(df1h)
-        if score >= 4:  # Critério para sinal forte
+        score, criterios, tipo = calcular_score(df1h, df5m, df15m, df30m)
+        if score >= 1.0:  # Critério para sinal forte
             preco = df1h["close"].iloc[-1]
             registrar_sinal(par, score, criterios, tipo)
             hora = datetime.utcnow().strftime("%H:%M:%S UTC")
             msg = f"""✅ Sinal forte detectado!
 🕒 Horário: {hora}
 📊 Par: {par}
-📈 Score: {score}/6
+📈 Score: {score}/1.6
 📌 Tipo de sinal: {tipo}
 💵 Preço atual: {preco}
 🧠 Critérios:"""
             for crit in criterios:
                 msg += f"\n• {crit}"
-            await enviar_telegram(msg)
+            enviar_telegram(msg)
 
-async def main():
-    await enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) atualizado e iniciado com sucesso!")
-    while True:
-        await analisar()
-        await asyncio.sleep(60)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# === INÍCIO DO BOT ===
+enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) atualizado e iniciado com sucesso!")
+while True:
+    analisar()
+    time.sleep(60)
