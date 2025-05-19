@@ -6,21 +6,10 @@ from datetime import datetime
 WAIT_TIME = 600  # Tempo de espera em segundos (10 minutos)
 last_signals = {}  # Dicionário para rastrear últimos sinais enviados por par
 
-def fetch_bybit_symbols():
-    url = "https://api.bybit.com/v2/public/symbols"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("result", [])
-        else:
-            print(f"Erro ao buscar pares na Bybit: {response.status_code} - {response.text}")
-            return []
-    except Exception as e:
-        print(f"Erro de conexão com Bybit: {e}")
-        return []
-
 def fetch_binance_symbols():
+    """
+    Busca os pares disponíveis na Binance.
+    """
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
     try:
         response = requests.get(url)
@@ -35,6 +24,9 @@ def fetch_binance_symbols():
         return []
 
 def analyze_pair(pair):
+    """
+    Realiza uma análise técnica simples para o par fornecido.
+    """
     # Simulação de análise técnica
     analysis = {
         "entry_price": 100.0,
@@ -45,6 +37,9 @@ def analyze_pair(pair):
     return analysis
 
 def send_signal(pair, analysis):
+    """
+    Envia um sinal baseado na análise técnica.
+    """
     global last_signals
 
     # Verificar se já foi enviado sinal recentemente
@@ -65,18 +60,12 @@ def send_signal(pair, analysis):
 
 def main():
     while True:
-        print("Buscando pares na Bybit...")
-        bybit_symbols = fetch_bybit_symbols()
-        print(f"Pares encontrados na Bybit: {len(bybit_symbols)}")
-
         print("Buscando pares na Binance...")
         binance_symbols = fetch_binance_symbols()
         print(f"Pares encontrados na Binance: {len(binance_symbols)}")
 
-        all_pairs = bybit_symbols + binance_symbols
-
-        if all_pairs:
-            for pair in all_pairs[:5]:  # Limitar para análise inicial de 5 pares
+        if binance_symbols:
+            for pair in binance_symbols[:5]:  # Limitar para análise inicial de 5 pares
                 analysis = analyze_pair(pair)
                 send_signal(pair, analysis)
         else:
