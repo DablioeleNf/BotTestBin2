@@ -1,78 +1,143 @@
 import requests
+import pandas as pd
 import time
+import ta
 from datetime import datetime
+from ta.trend import ADXIndicator, PSARIndicator
 
-# Configurações globais
-WAIT_TIME = 600  # Tempo de espera em segundos (10 minutos)
-last_signals = {}  # Dicionário para rastrear últimos sinais enviados por par
+# Configurações do bot
+TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
+CHAT_ID = "719387436"
+CSV_FILE = "sinais_registrados.csv"
 
-def fetch_binance_symbols():
-    """
-    Busca os pares disponíveis na Binance.
-    """
-    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+def enviar_telegram(mensagem):
     try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            return [symbol['symbol'] for symbol in data.get('symbols', [])]
-        else:
-            print(f"Erro ao buscar pares na Binance: {response.status_code} - {response.text}")
-            return []
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": mensagem}
+        )
     except Exception as e:
-        print(f"Erro de conexão com Binance: {e}")
+        print(f"Erro Telegram: {e}")
+
+def buscar_pares_futuros_usdt():
+    try:
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        r = requests.get(url, timeout=10).json()
+        return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
+    except Exception as e:
+        print(f"Erro ao buscar pares: {e}")
         return []
 
-def analyze_pair(pair):
-    """
-    Realiza uma análise técnica simples para o par fornecido.
-    """
-    # Simulação de análise técnica
-    analysis = {
-        "entry_price": 100.0,
-        "take_profits": [105.0, 110.0, 115.0],
-        "stop_loss": 95.0,
-        "timestamp": datetime.now().isoformat()
-    }
-    return analysis
+def obter_dados(par, intervalo="1h", limite=200):
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
+    try:
+        r = requests.get(url, timeout=10).json()
+        if isinstance(r, list):
+            df = pd.DataFrame(r, columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "close_time", "quote_asset_volume", "num_trades",
+                "taker_buy_base", "taker_buy_quote", "ignore"
+            ])
+            df["close"] = df["close"].astype(float)
+            df["open"] = df["open"].astype(float)
+            df["high"] = df["high"].astype(float)
+            df["low"] = df["low"].astype(float)
+            df["volume"] = df["volume"].astype(float)
+            return df
+    except Exception as e:
+        print(f"Erro ao obter dados do par {par}: {e}")
+        return None
 
-def send_signal(pair, analysis):
-    """
-    Envia um sinal baseado na análise técnica.
-    """
-    global last_signals
+def calcular_score(df1h, df5m, df15m, df30m):
+    score = 0
+    criterios = []
+    tipo = "Indefinido"
 
-    # Verificar se já foi enviado sinal recentemente
-    current_time = time.time()
-    if pair in last_signals and current_time - last_signals[pair] < WAIT_TIME:
-        print(f"Sinal para {pair} ignorado. Último sinal enviado há menos de {WAIT_TIME} segundos.")
+    # RSI
+    rsi = ta.momentum.RSIIndicator(df1h["close"]).rsi().iloc[-1]
+    if rsi > 70:
+        score += 1
+        criterios.append("RSI sobrecomprado")
+        tipo = "Venda"
+    elif rsi < 30:
+        score += 1
+        criterios.append("RSI sobrevendido")
+        tipo = "Compra"
+
+    # ADX
+    adx = ADXIndicator(df1h["high"], df1h["low"], df1h["close"]).adx().iloc[-1]
+    if adx > 25:
+        score += 1
+        criterios.append("Tendência forte detectada (ADX)")
+
+    # SAR Parabólico
+    psar = PSARIndicator(df1h["high"], df1h["low"], df1h["close"]).psar().iloc[-1]
+    if df1h["close"].iloc[-1] > psar:
+        criterios.append("SAR tendência de alta")
+    else:
+        criterios.append("SAR tendência de baixa")
+
+    # Bollinger Bands
+    bb = ta.volatility.BollingerBands(df1h["close"])
+    close = df1h["close"].iloc[-1]
+    if close < bb.bollinger_lband().iloc[-1]:
+        score += 1
+        criterios.append("Bollinger abaixo da banda inferior")
+    elif close > bb.bollinger_hband().iloc[-1]:
+        score += 1
+        criterios.append("Bollinger acima da banda superior")
+
+    # Suporte e Resistência
+    suporte = min(df1h["close"].tail(20))
+    resistencia = max(df1h["close"].tail(20))
+    margem = 0.02  # 2% de margem
+    if abs(close - suporte) / close < margem:
+        score += 1
+        criterios.append("Suporte próximo")
+    elif abs(close - resistencia) / close < margem:
+        score += 1
+        criterios.append("Resistência próxima")
+
+    return score, criterios, tipo
+
+def registrar_sinal(par, score, criterios, tipo):
+    agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    linha = f"{agora},{par},{score},{tipo},{'|'.join(criterios)}\n"
+    with open(CSV_FILE, "a") as f:
+        f.write(linha)
+
+def analisar():
+    pares = buscar_pares_futuros_usdt()
+    if not pares:
+        enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
         return
 
-    # Enviar sinal (simulação de envio)
-    print(f"Enviando sinal para {pair}...")
-    print(f"Entrada: {analysis['entry_price']}")
-    print(f"TPs: {analysis['take_profits']}")
-    print(f"SL: {analysis['stop_loss']}")
-    print(f"Análise gerada em: {analysis['timestamp']}")
+    for par in pares:
+        df1h = obter_dados(par, "1h")
+        df5m = obter_dados(par, "5m")
+        df15m = obter_dados(par, "15m")
+        df30m = obter_dados(par, "30m")
+        if df1h is None or df5m is None or df15m is None or df30m is None:
+            continue
 
-    # Atualizar o tempo do último sinal
-    last_signals[pair] = current_time
+        score, criterios, tipo = calcular_score(df1h, df5m, df15m, df30m)
+        if score >= 4:  # Critério para sinal forte
+            preco = df1h["close"].iloc[-1]
+            registrar_sinal(par, score, criterios, tipo)
+            hora = datetime.utcnow().strftime("%H:%M:%S UTC")
+            msg = f"""✅ Sinal forte detectado!
+🕒 Horário: {hora}
+📊 Par: {par}
+📈 Score: {score}/6
+📌 Tipo de sinal: {tipo}
+💵 Preço atual: {preco}
+🧠 Critérios:"""
+            for crit in criterios:
+                msg += f"\n• {crit}"
+            enviar_telegram(msg)
 
-def main():
-    while True:
-        print("Buscando pares na Binance...")
-        binance_symbols = fetch_binance_symbols()
-        print(f"Pares encontrados na Binance: {len(binance_symbols)}")
-
-        if binance_symbols:
-            for pair in binance_symbols[:5]:  # Limitar para análise inicial de 5 pares
-                analysis = analyze_pair(pair)
-                send_signal(pair, analysis)
-        else:
-            print("Nenhum par encontrado para análise.")
-
-        print(f"Aguardando {WAIT_TIME // 60} minutos para a próxima execução...")
-        time.sleep(WAIT_TIME)
-
-if __name__ == "__main__":
-    main()
+# === INÍCIO DO BOT ===
+enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) atualizado e iniciado com sucesso!")
+while True:
+    analisar()
+    time.sleep(60)
