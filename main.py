@@ -1,50 +1,38 @@
-import os
-import time
-import logging
 import requests
 import pandas as pd
+import time
+import ta
 from datetime import datetime
-from dotenv import load_dotenv
 from ta.trend import ADXIndicator, PSARIndicator
-from ta.volatility import BollingerBands
+from ta.volatility import AverageTrueRange
 from ta.momentum import RSIIndicator
 
-# === Carrega variáveis do arquivo .env ===
-load_dotenv()
-
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# Configurações do bot
+TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
+CHAT_ID = "719387436"
 CSV_FILE = "sinais_registrados.csv"
-INTERVALO_ANALISE = int(os.getenv("INTERVALO_ANALISE", 300))  # Padrão: 5 minutos
-
-# === Configuração de Logs ===
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def enviar_telegram(mensagem):
-    """Envia mensagens para o Telegram"""
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": mensagem}
         )
-        logging.info("Mensagem enviada com sucesso!")
     except Exception as e:
-        logging.error(f"Erro ao enviar mensagem no Telegram: {e}")
+        print(f"Erro Telegram: {e}")
 
 def buscar_pares_futuros_usdt():
-    """Busca os pares de Futuros USDT na Binance"""
     try:
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, timeout=10).json()
         return [s["symbol"] for s in r["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
     except Exception as e:
-        logging.error(f"Erro ao buscar pares: {e}")
+        print(f"Erro ao buscar pares: {e}")
         return []
 
 def obter_dados(par, intervalo="1h", limite=200):
-    """Obtém os dados históricos de um par específico"""
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
     try:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
         r = requests.get(url, timeout=10).json()
         if isinstance(r, list):
             df = pd.DataFrame(r, columns=[
@@ -59,17 +47,43 @@ def obter_dados(par, intervalo="1h", limite=200):
             df["volume"] = df["volume"].astype(float)
             return df
     except Exception as e:
-        logging.error(f"Erro ao obter dados do par {par}: {e}")
+        print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
-def calcular_score(df1h):
-    """Calcula o score de um par baseado em indicadores técnicos"""
+# === Melhoria 1: Identificação de Contexto de Mercado ===
+def identificar_contexto(df):
+    atr = AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range().iloc[-1]
+    adx = ADXIndicator(df["high"], df["low"], df["close"]).adx().iloc[-1]
+
+    if adx > 25:
+        return "Tendência", atr
+    elif adx < 20:
+        return "Consolidação", atr
+    else:
+        return "Indefinido", atr
+
+# === Melhoria 2: Detecção de Divergências ===
+def detectar_divergencia(df):
+    rsi = RSIIndicator(df["close"]).rsi()
+    precos = df["close"]
+
+    if (precos.iloc[-2] > precos.iloc[-1]) and (rsi.iloc[-2] < rsi.iloc[-1]):
+        return "Divergência de alta detectada (RSI)"
+    elif (precos.iloc[-2] < precos.iloc[-1]) and (rsi.iloc[-2] > rsi.iloc[-1]):
+        return "Divergência de baixa detectada (RSI)"
+    return None
+
+def calcular_score(df1h, df5m, df15m, df30m):
     score = 0
     criterios = []
     tipo = "Indefinido"
 
-    # RSI
-    rsi = RSIIndicator(df1h["close"]).rsi().iloc[-1]
+    # === Contexto do Mercado ===
+    contexto, atr = identificar_contexto(df1h)
+    criterios.append(f"Contexto de mercado: {contexto} (ATR: {atr:.2f})")
+
+    # === RSI ===
+    rsi = ta.momentum.RSIIndicator(df1h["close"]).rsi().iloc[-1]
     if rsi > 70:
         score += 1
         criterios.append("RSI sobrecomprado")
@@ -79,51 +93,27 @@ def calcular_score(df1h):
         criterios.append("RSI sobrevendido")
         tipo = "Compra"
 
-    # ADX
+    # === Divergência ===
+    divergencia = detectar_divergencia(df1h)
+    if divergencia:
+        score += 1
+        criterios.append(divergencia)
+
+    # === Outros indicadores (Mantidos como antes) ===
     adx = ADXIndicator(df1h["high"], df1h["low"], df1h["close"]).adx().iloc[-1]
     if adx > 25:
         score += 1
         criterios.append("Tendência forte detectada (ADX)")
 
-    # SAR Parabólico
     psar = PSARIndicator(df1h["high"], df1h["low"], df1h["close"]).psar().iloc[-1]
     if df1h["close"].iloc[-1] > psar:
         criterios.append("SAR tendência de alta")
     else:
         criterios.append("SAR tendência de baixa")
 
-    # Bollinger Bands
-    bb = BollingerBands(df1h["close"])
-    close = df1h["close"].iloc[-1]
-    if close < bb.bollinger_lband().iloc[-1]:
-        score += 1
-        criterios.append("Bollinger abaixo da banda inferior")
-    elif close > bb.bollinger_hband().iloc[-1]:
-        score += 1
-        criterios.append("Bollinger acima da banda superior")
-
     return score, criterios, tipo
 
-def registrar_sinal(par, score, criterios, tipo):
-    """Registra os sinais em um arquivo CSV"""
-    agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    linha = f"{agora},{par},{score},{tipo},{'|'.join(criterios)}\n"
-    with open(CSV_FILE, "a") as f:
-        f.write(linha)
-
-def limpar_csv(dias=30):
-    """Limpa registros antigos do CSV"""
-    if not os.path.exists(CSV_FILE):
-        return
-
-    df = pd.read_csv(CSV_FILE, names=["timestamp", "par", "score", "tipo", "criterios"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    limite = datetime.utcnow() - pd.Timedelta(days=dias)
-    df = df[df["timestamp"] > limite]
-    df.to_csv(CSV_FILE, index=False, header=False)
-
 def analisar():
-    """Analisa os pares e envia sinais fortes para o Telegram"""
     pares = buscar_pares_futuros_usdt()
     if not pares:
         enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
@@ -131,11 +121,14 @@ def analisar():
 
     for par in pares:
         df1h = obter_dados(par, "1h")
-        if df1h is None:
+        df5m = obter_dados(par, "5m")
+        df15m = obter_dados(par, "15m")
+        df30m = obter_dados(par, "30m")
+        if df1h is None or df5m is None or df15m is None or df30m is None:
             continue
 
-        score, criterios, tipo = calcular_score(df1h)
-        if score >= 3:  # Critério para sinal forte
+        score, criterios, tipo = calcular_score(df1h, df5m, df15m, df30m)
+        if score >= 4:  # Critério para sinal forte
             preco = df1h["close"].iloc[-1]
             registrar_sinal(par, score, criterios, tipo)
             hora = datetime.utcnow().strftime("%H:%M:%S UTC")
@@ -150,12 +143,8 @@ def analisar():
                 msg += f"\n• {crit}"
             enviar_telegram(msg)
 
-        time.sleep(5)  # Pausa entre os pares
-
 # === INÍCIO DO BOT ===
-if __name__ == "__main__":
-    enviar_telegram("🤖 Bot de sinais cripto 24h iniciado com sucesso!")
-    while True:
-        limpar_csv()  # Limpa registros antigos
-        analisar()
-        time.sleep(INTERVALO_ANALISE)
+enviar_telegram("🤖 Bot de sinais cripto atualizado e iniciado com melhorias!")
+while True:
+    analisar()
+    time.sleep(60)
