@@ -55,6 +55,24 @@ def obter_dados(par, intervalo="1h"):
         print(f"Erro ao buscar dados do par {par}: {e}")
         return None
 
+def calcular_niveis(close, risco=RISCO_PERCENTUAL):
+    """
+    Calcula o preço de entrada, stop loss e take profits.
+    """
+    # Cálculo básico de níveis
+    tp1 = round(close * (1 + risco), 2)
+    tp2 = round(close * (1 + 2 * risco), 2)
+    tp3 = round(close * (1 + 3 * risco), 2)
+    stop_loss = round(close * (1 - risco), 2)
+
+    return {
+        "preco_entrada": round(close, 2),
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "stop_loss": stop_loss
+    }
+
 def analisar():
     """
     Realiza análise técnica para identificar sinais de compra/venda.
@@ -77,21 +95,31 @@ def analisar():
         close = df["close"].iloc[-1]
 
         if rsi < 30:
-            tipo = "Compra"
+            niveis = calcular_niveis(close)
             mensagem = f"""✅ Sinal de Compra Detectado!
 📊 Par: {par}
 💵 Preço Atual: {close}
 📈 RSI: {rsi:.2f} (Sobrevendido)
+🔹 Preço de Entrada: {niveis['preco_entrada']}
+🔸 Take Profit 1: {niveis['tp1']}
+🔸 Take Profit 2: {niveis['tp2']}
+🔸 Take Profit 3: {niveis['tp3']}
+❌ Stop Loss: {niveis['stop_loss']}
             """
             enviar_telegram(mensagem)
             sinais_enviados[par] = agora
 
         elif rsi > 70:
-            tipo = "Venda"
+            niveis = calcular_niveis(close)
             mensagem = f"""❌ Sinal de Venda Detectado!
 📊 Par: {par}
 💵 Preço Atual: {close}
 📉 RSI: {rsi:.2f} (Sobrecomprado)
+🔹 Preço de Entrada: {niveis['preco_entrada']}
+🔸 Take Profit 1: {niveis['tp1']}
+🔸 Take Profit 2: {niveis['tp2']}
+🔸 Take Profit 3: {niveis['tp3']}
+❌ Stop Loss: {niveis['stop_loss']}
             """
             enviar_telegram(mensagem)
             sinais_enviados[par] = agora
