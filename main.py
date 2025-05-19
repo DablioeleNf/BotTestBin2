@@ -1,16 +1,17 @@
 import requests
 import pandas as pd
 import time
-import ta
 from datetime import datetime
-from ta.trend import ADXIndicator, PSARIndicator, MACD
-from ta.momentum import RSIIndicator, CCIIndicator
+from ta.momentum import RSIIndicator
+from ta.trend import ADXIndicator, PSARIndicator
+from ta.volatility import BollingerBands
 
 # Configurações do bot
-TOKEN = "SEU_TELEGRAM_BOT_TOKEN"
+TOKEN = "SEU_TOKEN"
 CHAT_ID = "SEU_CHAT_ID"
 CSV_FILE = "sinais_registrados.csv"
 
+# Função para envio de mensagens no Telegram
 def enviar_telegram(mensagem):
     try:
         requests.post(
@@ -18,8 +19,17 @@ def enviar_telegram(mensagem):
             data={"chat_id": CHAT_ID, "text": mensagem}
         )
     except Exception as e:
-        print(f"Erro Telegram: {e}")
+        print(f"Erro ao enviar mensagem no Telegram: {e}")
 
+# Função para calcular o CCI manualmente
+def calcular_cci(high, low, close, window=20):
+    tp = (high + low + close) / 3  # Preço típico
+    sma = tp.rolling(window=window).mean()  # Média móvel simples
+    mad = tp.rolling(window=window).apply(lambda x: (x - x.mean()).abs().mean())  # Média de desvio absoluto
+    cci = (tp - sma) / (0.015 * mad)
+    return cci
+
+# Buscar pares de futuros USDT
 def buscar_pares_futuros_usdt():
     try:
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
@@ -29,6 +39,7 @@ def buscar_pares_futuros_usdt():
         print(f"Erro ao buscar pares: {e}")
         return []
 
+# Obter dados históricos
 def obter_dados(par, intervalo="1h", limite=200):
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
     try:
@@ -49,6 +60,7 @@ def obter_dados(par, intervalo="1h", limite=200):
         print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
+# Calcular score do par
 def calcular_score(df1h, df5m, df15m, df30m):
     score = 0
     criterios = []
@@ -71,23 +83,6 @@ def calcular_score(df1h, df5m, df15m, df30m):
         score += 1
         criterios.append("Tendência forte detectada (ADX)")
 
-    # MACD
-    macd = MACD(df1h["close"])
-    if macd.macd_diff().iloc[-1] > 0:
-        score += 1
-        criterios.append("MACD cruzamento de alta")
-    else:
-        criterios.append("MACD cruzamento de baixa")
-
-    # CCI
-    cci = CCIIndicator(df1h["high"], df1h["low"], df1h["close"]).cci().iloc[-1]
-    if cci > 100:
-        score += 1
-        criterios.append("CCI forte tendência de alta")
-    elif cci < -100:
-        score += 1
-        criterios.append("CCI forte tendência de baixa")
-
     # SAR Parabólico
     psar = PSARIndicator(df1h["high"], df1h["low"], df1h["close"]).psar().iloc[-1]
     if df1h["close"].iloc[-1] > psar:
@@ -96,7 +91,7 @@ def calcular_score(df1h, df5m, df15m, df30m):
         criterios.append("SAR tendência de baixa")
 
     # Bollinger Bands
-    bb = ta.volatility.BollingerBands(df1h["close"])
+    bb = BollingerBands(df1h["close"])
     close = df1h["close"].iloc[-1]
     if close < bb.bollinger_lband().iloc[-1]:
         score += 1
@@ -105,25 +100,25 @@ def calcular_score(df1h, df5m, df15m, df30m):
         score += 1
         criterios.append("Bollinger acima da banda superior")
 
-    # Suporte e Resistência
-    suporte = min(df1h["close"].tail(20))
-    resistencia = max(df1h["close"].tail(20))
-    margem = 0.02  # 2% de margem
-    if abs(close - suporte) / close < margem:
+    # CCI
+    cci = calcular_cci(df1h["high"], df1h["low"], df1h["close"]).iloc[-1]
+    if cci > 100:
         score += 1
-        criterios.append("Suporte próximo")
-    elif abs(close - resistencia) / close < margem:
+        criterios.append("CCI sobrecomprado")
+    elif cci < -100:
         score += 1
-        criterios.append("Resistência próxima")
+        criterios.append("CCI sobrevendido")
 
     return score, criterios, tipo
 
+# Registrar sinais
 def registrar_sinal(par, score, criterios, tipo):
     agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     linha = f"{agora},{par},{score},{tipo},{'|'.join(criterios)}\n"
     with open(CSV_FILE, "a") as f:
         f.write(linha)
 
+# Analisar pares
 def analisar():
     pares = buscar_pares_futuros_usdt()
     if not pares:
@@ -146,7 +141,7 @@ def analisar():
             msg = f"""✅ Sinal forte detectado!
 🕒 Horário: {hora}
 📊 Par: {par}
-📈 Score: {score}/7
+📈 Score: {score}/6
 📌 Tipo de sinal: {tipo}
 💵 Preço atual: {preco}
 🧠 Critérios:"""
