@@ -1,131 +1,148 @@
 import requests
 import pandas as pd
 import time
+import ta
 from datetime import datetime, timedelta
-from ta.momentum import RSIIndicator
+from ta.trend import ADXIndicator
 from ta.volatility import BollingerBands
-
-# Configurações do Telegram
-TELEGRAM_TOKEN = "SEU_TELEGRAM_TOKEN"  # Substitua pelo seu token do bot
-TELEGRAM_CHAT_ID = "SEU_TELEGRAM_CHAT_ID"  # Substitua pelo ID do seu chat
+from ta.momentum import RSIIndicator
 
 # Configurações do bot
-BINANCE_API_URL = "https://api.binance.com/api/v3"
-SIGNAL_DELAY = timedelta(minutes=15)  # Tempo de espera entre sinais do mesmo par
+TOKEN = "SEU_TOKEN_TELEGRAM"
+CHAT_ID = "SEU_CHAT_ID_TELEGRAM"
 RISCO_PERCENTUAL = 0.02  # 2% de risco por operação
+TEMPO_ESPERA = timedelta(minutes=10)  # Espera entre sinais do mesmo par
 
-sinais_enviados = {}  # Armazena o último envio de sinais para cada par
+# Dicionário para rastrear sinais enviados
+sinais_enviados = {}
 
+# Envia mensagem no Telegram
 def enviar_telegram(mensagem):
-    """
-    Envia mensagens para o Telegram.
-    """
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        response = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": mensagem})
-        if response.status_code != 200:
-            print(f"Erro ao enviar mensagem no Telegram: {response.text}")
+        response = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": mensagem}
+        )
+        response.raise_for_status()
     except Exception as e:
-        print(f"Erro ao conectar com Telegram: {e}")
+        print(f"Erro Telegram: {e}")
 
-def buscar_pares_usdt():
-    """
-    Busca todos os pares de negociação disponíveis em USDT.
-    """
+# Mensagem inicial para confirmar que o bot iniciou
+enviar_telegram("🤖 Bot de sinais iniciado com sucesso! Agora monitorando pares de criptomoedas.")
+
+# Busca todos os pares futuros com USDT na Binance
+def buscar_pares_futuros_usdt():
     try:
-        response = requests.get(f"{BINANCE_API_URL}/ticker/price").json()
-        return [x["symbol"] for x in response if x["symbol"].endswith("USDT")]
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        response = requests.get(url, timeout=10).json()
+        return [s["symbol"] for s in response["symbols"] if s["symbol"].endswith("USDT") and s["contractType"] == "PERPETUAL"]
     except Exception as e:
-        enviar_telegram(f"Erro ao buscar pares na Binance: {e}")
+        print(f"Erro ao buscar pares: {e}")
         return []
 
-def obter_dados(par, intervalo="1h"):
-    """
-    Obtém os dados de preços históricos para um par de negociação.
-    """
+# Obtém os dados de velas do par específico
+def obter_dados(par, intervalo="1h", limite=200):
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={par}&interval={intervalo}&limit=100"
-        data = requests.get(url).json()
-        df = pd.DataFrame(data, columns=[
-            "time", "open", "high", "low", "close", "volume", *range(6)
-        ])
-        df["close"] = pd.to_numeric(df["close"])
-        return df
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={par}&interval={intervalo}&limit={limite}"
+        response = requests.get(url, timeout=10).json()
+        if isinstance(response, list):
+            df = pd.DataFrame(response, columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "close_time", "quote_asset_volume", "num_trades",
+                "taker_buy_base", "taker_buy_quote", "ignore"
+            ])
+            df["close"] = df["close"].astype(float)
+            df["open"] = df["open"].astype(float)
+            df["high"] = df["high"].astype(float)
+            df["low"] = df["low"].astype(float)
+            return df
     except Exception as e:
-        print(f"Erro ao buscar dados do par {par}: {e}")
-        return None
+        print(f"Erro ao obter dados do par {par}: {e}")
+    return None
 
-def calcular_niveis(close, risco=RISCO_PERCENTUAL):
-    """
-    Calcula o preço de entrada, stop loss e take profits.
-    """
-    # Cálculo básico de níveis
-    tp1 = round(close * (1 + risco), 2)
-    tp2 = round(close * (1 + 2 * risco), 2)
-    tp3 = round(close * (1 + 3 * risco), 2)
-    stop_loss = round(close * (1 - risco), 2)
+# Análise dinâmica com score ajustável
+def calcular_score(df):
+    score = 0
+    criterios = []
+    tipo = "Indefinido"
 
-    return {
-        "preco_entrada": round(close, 2),
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "stop_loss": stop_loss
-    }
+    # RSI
+    rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
+    if rsi > 70:
+        score += 1
+        criterios.append("RSI sobrecomprado")
+        tipo = "Venda"
+    elif rsi < 30:
+        score += 1
+        criterios.append("RSI sobrevendido")
+        tipo = "Compra"
 
+    # ADX
+    adx = ADXIndicator(df["high"], df["low"], df["close"]).adx().iloc[-1]
+    if adx > 25:
+        score += 1
+        criterios.append("Tendência forte detectada (ADX)")
+
+    # Bollinger Bands
+    bb = BollingerBands(df["close"])
+    close = df["close"].iloc[-1]
+    if close < bb.bollinger_lband().iloc[-1]:
+        score += 1
+        criterios.append("Preço abaixo da banda inferior")
+    elif close > bb.bollinger_hband().iloc[-1]:
+        score += 1
+        criterios.append("Preço acima da banda superior")
+
+    # Dinâmica: Ajusta o score mínimo necessário com base no ADX
+    score_minimo = 2 if adx < 25 else 3
+
+    return score, criterios, tipo, score_minimo
+
+# Função principal para analisar os sinais
 def analisar():
-    """
-    Realiza análise técnica para identificar sinais de compra/venda.
-    """
-    pares = buscar_pares_usdt()
+    pares = buscar_pares_futuros_usdt()
     if not pares:
+        enviar_telegram("❌ Erro ao buscar pares futuros na Binance.")
         return
 
     for par in pares:
         agora = datetime.utcnow()
-        if par in sinais_enviados and agora - sinais_enviados[par] < SIGNAL_DELAY:
-            continue  # Ignorar pares já analisados recentemente
+        if par in sinais_enviados and agora - sinais_enviados[par] < TEMPO_ESPERA:
+            continue
 
         df = obter_dados(par)
         if df is None:
             continue
 
-        # Análise Técnica
-        rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
-        close = df["close"].iloc[-1]
+        score, criterios, tipo, score_minimo = calcular_score(df)
+        if score >= score_minimo:
+            close = df["close"].iloc[-1]
+            suporte = df["low"].tail(20).min()
+            resistencia = df["high"].tail(20).max()
 
-        if rsi < 30:
-            niveis = calcular_niveis(close)
-            mensagem = f"""✅ Sinal de Compra Detectado!
+            preco_entrada = close
+            stop_loss = round(preco_entrada * (1 - RISCO_PERCENTUAL), 2)
+            tp1 = round(preco_entrada * (1 + RISCO_PERCENTUAL), 2)
+            tp2 = round(preco_entrada * (1 + 2 * RISCO_PERCENTUAL), 2)
+            tp3 = round(preco_entrada * (1 + 3 * RISCO_PERCENTUAL), 2)
+
+            mensagem = f"""✅ Sinal detectado!
 📊 Par: {par}
+📈 Score: {score}/{score_minimo}
 💵 Preço Atual: {close}
-📈 RSI: {rsi:.2f} (Sobrevendido)
-🔹 Preço de Entrada: {niveis['preco_entrada']}
-🔸 Take Profit 1: {niveis['tp1']}
-🔸 Take Profit 2: {niveis['tp2']}
-🔸 Take Profit 3: {niveis['tp3']}
-❌ Stop Loss: {niveis['stop_loss']}
-            """
+🔹 Preço de Entrada: {preco_entrada}
+🔸 Take Profit 1: {tp1}
+🔸 Take Profit 2: {tp2}
+🔸 Take Profit 3: {tp3}
+❌ Stop Loss: {stop_loss}
+📋 Critérios utilizados:"""
+            for crit in criterios:
+                mensagem += f"\n- {crit}"
             enviar_telegram(mensagem)
+
             sinais_enviados[par] = agora
 
-        elif rsi > 70:
-            niveis = calcular_niveis(close)
-            mensagem = f"""❌ Sinal de Venda Detectado!
-📊 Par: {par}
-💵 Preço Atual: {close}
-📉 RSI: {rsi:.2f} (Sobrecomprado)
-🔹 Preço de Entrada: {niveis['preco_entrada']}
-🔸 Take Profit 1: {niveis['tp1']}
-🔸 Take Profit 2: {niveis['tp2']}
-🔸 Take Profit 3: {niveis['tp3']}
-❌ Stop Loss: {niveis['stop_loss']}
-            """
-            enviar_telegram(mensagem)
-            sinais_enviados[par] = agora
-
-# Bot loop
-enviar_telegram("🤖 Bot de sinais iniciado com sucesso!")
+# Início do bot
 while True:
     analisar()
-    time.sleep(60)  # Aguarda 60 segundos antes de rodar a análise novamente
+    time.sleep(60)
