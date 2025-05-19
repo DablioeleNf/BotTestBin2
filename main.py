@@ -3,14 +3,11 @@ import pandas as pd
 import time
 import ta
 from datetime import datetime, timedelta
-from ta.trend import ADXIndicator, PSARIndicator
 
 # Configurações do bot
 TOKEN = "8088057144:AAED-qGi9sXtQ42LK8L1MwwTqZghAE21I3U"
 CHAT_ID = "719387436"
 CSV_FILE = "sinais_registrados.csv"
-
-# Controle para evitar spam por par+timeframe
 ultimo_envio = {}
 
 def enviar_telegram(mensagem):
@@ -51,63 +48,42 @@ def obter_dados(par, intervalo="1h", limite=200):
         print(f"Erro ao obter dados do par {par}: {e}")
         return None
 
+def calcular_suporte_resistencia(df):
+    """Calcula suporte e resistência usando as máximas e mínimas recentes."""
+    suporte = df["low"].rolling(window=20).min().iloc[-1]
+    resistencia = df["high"].rolling(window=20).max().iloc[-1]
+    return suporte, resistencia
+
 def calcular_score(df):
     score = 0
     criterios = []
     tipo = "Indefinido"
 
-    # RSI
-    rsi = ta.momentum.RSIIndicator(df["close"]).rsi().iloc[-1]
-    if rsi > 70:
+    # MACD
+    macd = ta.trend.MACD(df["close"]).macd_diff().iloc[-1]
+    if macd > 0:
         score += 1
-        criterios.append("RSI sobrecomprado")
-        tipo = "Venda"
-    elif rsi < 30:
-        score += 1
-        criterios.append("RSI sobrevendido")
+        criterios.append("MACD sinal positivo")
         tipo = "Compra"
-
-    # ADX
-    adx = ADXIndicator(df["high"], df["low"], df["close"]).adx().iloc[-1]
-    if adx > 25:
+    elif macd < 0:
         score += 1
-        criterios.append("Tendência forte detectada (ADX)")
+        criterios.append("MACD sinal negativo")
+        tipo = "Venda"
 
-    # SAR Parabólico
-    psar = PSARIndicator(df["high"], df["low"], df["close"]).psar().iloc[-1]
-    if df["close"].iloc[-1] > psar:
-        criterios.append("SAR tendência de alta")
-    else:
-        criterios.append("SAR tendência de baixa")
-
-    # Bollinger Bands
-    bb = ta.volatility.BollingerBands(df["close"])
-    close = df["close"].iloc[-1]
-    if close < bb.bollinger_lband().iloc[-1]:
-        score += 1
-        criterios.append("Bollinger abaixo da banda inferior")
-    elif close > bb.bollinger_hband().iloc[-1]:
-        score += 1
-        criterios.append("Bollinger acima da banda superior")
+    # ATR
+    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range().iloc[-1]
 
     # Suporte e Resistência
-    suporte = min(df["close"].tail(20))
-    resistencia = max(df["close"].tail(20))
-    margem = 0.02  # 2% de margem
-    if abs(close - suporte) / close < margem:
+    suporte, resistencia = calcular_suporte_resistencia(df)
+    preco_atual = df["close"].iloc[-1]
+    if preco_atual < suporte * 1.02:
         score += 1
-        criterios.append("Suporte próximo")
-    elif abs(close - resistencia) / close < margem:
+        criterios.append("Preço próximo ao suporte")
+    elif preco_atual > resistencia * 0.98:
         score += 1
-        criterios.append("Resistência próxima")
+        criterios.append("Preço próximo à resistência")
 
-    return score, criterios, tipo
-
-def registrar_sinal(par, score, criterios, tipo, timeframe):
-    agora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    linha = f"{agora},{par},{score},{tipo},{timeframe},{'|'.join(criterios)}\n"
-    with open(CSV_FILE, "a") as f:
-        f.write(linha)
+    return score, criterios, tipo, suporte, resistencia, atr
 
 def analisar():
     pares = buscar_pares_futuros_usdt()
@@ -121,7 +97,6 @@ def analisar():
     for par in pares:
         for tf in timeframes:
             key = f"{par}_{tf}"
-            # Evita spam do par+timeframe em 10 min
             if key in ultimo_envio and agora - ultimo_envio[key] < timedelta(minutes=10):
                 continue
 
@@ -129,34 +104,27 @@ def analisar():
             if df is None:
                 continue
 
-            score, criterios, tipo = calcular_score(df)
+            score, criterios, tipo, suporte, resistencia, atr = calcular_score(df)
             if score >= 4:
                 preco_atual = df["close"].iloc[-1]
-                ema20 = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator().iloc[-1]
-                preco_entrada = ema20
 
-                margem_sl = 0.015
-                margem_tp1 = 0.015
-                margem_tp2 = 0.03
-                margem_tp3 = 0.05
-                margem_tp4 = 0.08
+                margem_sl = atr
+                margem_tp1 = atr * 1.5
+                margem_tp2 = atr * 3
+                margem_tp3 = atr * 5
 
                 if tipo == "Compra":
-                    stop_loss = preco_entrada * (1 - margem_sl)
-                    tp1 = preco_entrada * (1 + margem_tp1)
-                    tp2 = preco_entrada * (1 + margem_tp2)
-                    tp3 = preco_entrada * (1 + margem_tp3)
-                    tp4 = preco_entrada * (1 + margem_tp4)
+                    stop_loss = preco_atual - margem_sl
+                    tp1 = preco_atual + margem_tp1
+                    tp2 = preco_atual + margem_tp2
+                    tp3 = preco_atual + margem_tp3
                 elif tipo == "Venda":
-                    stop_loss = preco_entrada * (1 + margem_sl)
-                    tp1 = preco_entrada * (1 - margem_tp1)
-                    tp2 = preco_entrada * (1 - margem_tp2)
-                    tp3 = preco_entrada * (1 - margem_tp3)
-                    tp4 = preco_entrada * (1 - margem_tp4)
+                    stop_loss = preco_atual + margem_sl
+                    tp1 = preco_atual - margem_tp1
+                    tp2 = preco_atual - margem_tp2
+                    tp3 = preco_atual - margem_tp3
                 else:
                     continue
-
-                duracao = f"Entrada no timeframe {tf}, curto prazo (até 24h)"
 
                 registrar_sinal(par, score, criterios, tipo, tf)
                 ultimo_envio[key] = agora
@@ -169,20 +137,19 @@ def analisar():
 📈 Score: {score}/6
 📌 Tipo de sinal: {tipo}
 💰 Preço Atual: {preco_atual:.4f}
-🎯 Preço de Entrada (EMA20 {tf}): {preco_entrada:.4f}
+🎯 Suporte: {suporte:.4f}
+🎯 Resistência: {resistencia:.4f}
 ⛔ Stop Loss: {stop_loss:.4f}
 🎯 Take Profit 1: {tp1:.4f}
 🎯 Take Profit 2: {tp2:.4f}
 🎯 Take Profit 3: {tp3:.4f}
-🎯 Alvo Final (TP4): {tp4:.4f}
-⏳ Duração estimada: {duracao}
 🧠 Critérios:"""
                 for crit in criterios:
                     msg += f"\n• {crit}"
                 enviar_telegram(msg)
 
 # === INÍCIO DO BOT ===
-enviar_telegram("🤖 Bot de sinais cripto 24h (Futuros USDT) iniciado com múltiplos timeframes!")
+enviar_telegram("🤖 Bot de sinais cripto atualizado com novos indicadores e suporte/resistência dinâmicos!")
 while True:
     analisar()
     time.sleep(60)
